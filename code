@@ -1,0 +1,328 @@
+#include <gtk/gtk.h>
+#include <stdlib.h>
+#include <string.h>
+#include <time.h>
+
+#define MAX_PROCESSES 10
+#define MAX_MEMORY_BLOCKS 10
+#define MAX_LOGS 50
+
+typedef struct {
+    int pid;
+    int arrival_time;
+    int burst_time;
+    int priority;
+    int remaining_time;
+    int turnaround_time;
+    int waiting_time;
+} Process;
+
+typedef struct {
+    int block_id;
+    int size;
+    char status[10];
+    int allocated_to_pid; // To track which process (if any) is using this block
+} MemoryBlock;
+
+typedef struct {
+    char timestamp[20];
+    char action[200];
+} SystemCall;
+
+Process processes[MAX_PROCESSES];
+MemoryBlock memory_blocks[MAX_MEMORY_BLOCKS];
+SystemCall system_calls[MAX_LOGS];
+int process_count = 0, memory_count = 0, log_count = 0;
+
+GtkWidget *window;
+GtkWidget *process_table_view, *memory_table_view, *system_calls_table_view;
+
+// Function Prototypes
+void show_main_menu();
+void show_process_management();
+void show_memory_management();
+void show_system_calls();
+void update_process_table();
+void update_memory_table();
+void update_system_calls_table();
+void add_process(GtkWidget *widget, gpointer data);
+void delete_process(GtkWidget *widget, gpointer data);
+void add_memory_block(GtkWidget *widget, gpointer data);
+void deallocate_memory(GtkWidget *widget, gpointer data);
+void perform_scheduling(GtkWidget *widget, gpointer data);
+void log_system_call(const char *action);
+void round_robin(int quantum);
+void sjf();
+void priority_scheduling();
+
+// Log System Calls
+void log_system_call(const char *action) {
+    if (log_count >= MAX_LOGS) return;
+    time_t t = time(NULL);
+    struct tm *tm_info = localtime(&t);
+    strftime(system_calls[log_count].timestamp, sizeof(system_calls[log_count].timestamp), "%Y-%m-%d %H:%M:%S", tm_info);
+    strncpy(system_calls[log_count].action, action, sizeof(system_calls[log_count].action) - 1);
+
+    log_count++;
+    update_system_calls_table();
+}
+
+// Update Process Table
+void update_process_table() {
+    GtkListStore *store = gtk_list_store_new(6, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT, G_TYPE_INT);
+    GtkTreeIter iter;
+
+    for (int i = 0; i < process_count; i++) {
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+                           0, processes[i].pid,
+                           1, processes[i].arrival_time,
+                           2, processes[i].burst_time,
+                           3, processes[i].remaining_time,
+                           4, processes[i].turnaround_time,
+                           5, processes[i].waiting_time,
+                           -1);
+    }
+
+    gtk_tree_view_set_model(GTK_TREE_VIEW(process_table_view), GTK_TREE_MODEL(store));
+
+    if (gtk_tree_view_get_n_columns(GTK_TREE_VIEW(process_table_view)) == 0) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+
+        GtkTreeViewColumn *col_pid = gtk_tree_view_column_new_with_attributes("PID", renderer, "text", 0, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_pid);
+
+        GtkTreeViewColumn *col_arrival = gtk_tree_view_column_new_with_attributes("Arrival Time", renderer, "text", 1, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_arrival);
+
+        GtkTreeViewColumn *col_burst = gtk_tree_view_column_new_with_attributes("Burst Time", renderer, "text", 2, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_burst);
+
+        GtkTreeViewColumn *col_remaining = gtk_tree_view_column_new_with_attributes("Remaining Time", renderer, "text", 3, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_remaining);
+
+        GtkTreeViewColumn *col_tat = gtk_tree_view_column_new_with_attributes("Turnaround Time", renderer, "text", 4, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_tat);
+
+        GtkTreeViewColumn *col_wait = gtk_tree_view_column_new_with_attributes("Waiting Time", renderer, "text", 5, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(process_table_view), col_wait);
+    }
+
+    g_object_unref(store);
+}
+
+// Update Memory Table
+void update_memory_table() {
+    GtkListStore *store = gtk_list_store_new(4, G_TYPE_INT, G_TYPE_INT, G_TYPE_STRING, G_TYPE_INT);
+    GtkTreeIter iter;
+
+    for (int i = 0; i < memory_count; i++) {
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+                           0, memory_blocks[i].block_id,
+                           1, memory_blocks[i].size,
+                           2, memory_blocks[i].status,
+                           3, memory_blocks[i].allocated_to_pid,
+                           -1);
+    }
+
+    gtk_tree_view_set_model(GTK_TREE_VIEW(memory_table_view), GTK_TREE_MODEL(store));
+
+    if (gtk_tree_view_get_n_columns(GTK_TREE_VIEW(memory_table_view)) == 0) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+
+        GtkTreeViewColumn *col_id = gtk_tree_view_column_new_with_attributes("Block ID", renderer, "text", 0, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(memory_table_view), col_id);
+
+        GtkTreeViewColumn *col_size = gtk_tree_view_column_new_with_attributes("Size (KB)", renderer, "text", 1, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(memory_table_view), col_size);
+
+        GtkTreeViewColumn *col_status = gtk_tree_view_column_new_with_attributes("Status", renderer, "text", 2, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(memory_table_view), col_status);
+
+        GtkTreeViewColumn *col_allocated = gtk_tree_view_column_new_with_attributes("Allocated To PID", renderer, "text", 3, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(memory_table_view), col_allocated);
+    }
+
+    g_object_unref(store);
+}
+
+// Update System Calls Table
+void update_system_calls_table() {
+    GtkListStore *store = gtk_list_store_new(2, G_TYPE_STRING, G_TYPE_STRING);
+    GtkTreeIter iter;
+
+    for (int i = 0; i < log_count; i++) {
+        gtk_list_store_append(store, &iter);
+        gtk_list_store_set(store, &iter,
+                           0, system_calls[i].timestamp,
+                           1, system_calls[i].action,
+                           -1);
+    }
+
+    gtk_tree_view_set_model(GTK_TREE_VIEW(system_calls_table_view), GTK_TREE_MODEL(store));
+
+    if (gtk_tree_view_get_n_columns(GTK_TREE_VIEW(system_calls_table_view)) == 0) {
+        GtkCellRenderer *renderer = gtk_cell_renderer_text_new();
+
+        GtkTreeViewColumn *col_timestamp = gtk_tree_view_column_new_with_attributes("Timestamp", renderer, "text", 0, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(system_calls_table_view), col_timestamp);
+
+        GtkTreeViewColumn *col_action = gtk_tree_view_column_new_with_attributes("Action", renderer, "text", 1, NULL);
+        gtk_tree_view_append_column(GTK_TREE_VIEW(system_calls_table_view), col_action);
+    }
+
+    g_object_unref(store);
+}
+
+// Delete Process
+void delete_process(GtkWidget *widget, gpointer data) {
+    if (process_count > 0) {
+        process_count--;
+        log_system_call("Process deleted.");
+        update_process_table();
+    } else {
+        g_print("No processes to delete.\n");
+    }
+}
+
+// Perform Scheduling
+void perform_scheduling(GtkWidget *widget, gpointer data) {
+    GtkWidget *dialog = gtk_dialog_new_with_buttons("Select Scheduling Algorithm", GTK_WINDOW(window), GTK_DIALOG_MODAL,
+                                                     "Round Robin", 1,
+                                                     "Shortest Job First", 2,
+                                                     "Priority Scheduling", 3,
+                                                     "Cancel", GTK_RESPONSE_CANCEL, NULL);
+
+    int response = gtk_dialog_run(GTK_DIALOG(dialog));
+
+    if (response == 1) {
+        GtkWidget *quantum_dialog = gtk_dialog_new_with_buttons("Set Quantum", GTK_WINDOW(window), GTK_DIALOG_MODAL,
+                                                                "_OK", GTK_RESPONSE_OK,
+                                                                "_Cancel", GTK_RESPONSE_CANCEL, NULL);
+        GtkWidget *quantum_entry = gtk_entry_new();
+        GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(quantum_dialog));
+        gtk_box_pack_start(GTK_BOX(content_area), gtk_label_new("Enter Time Quantum:"), FALSE, FALSE, 5);
+        gtk_box_pack_start(GTK_BOX(content_area), quantum_entry, FALSE, FALSE, 5);
+        gtk_widget_show_all(quantum_dialog);
+
+        if (gtk_dialog_run(GTK_DIALOG(quantum_dialog)) == GTK_RESPONSE_OK) {
+            int quantum = atoi(gtk_entry_get_text(GTK_ENTRY(quantum_entry)));
+            round_robin(quantum);
+        }
+
+        gtk_widget_destroy(quantum_dialog);
+    } else if (response == 2) {
+        sjf();
+    } else if (response == 3) {
+        priority_scheduling();
+    }
+
+    gtk_widget_destroy
+                                                                NULL);
+
+        GtkWidget *content_area = gtk_dialog_get_content_area(GTK_DIALOG(quantum_dialog));
+        GtkWidget *quantum_entry = gtk_entry_new();
+
+        gtk_box_pack_start(GTK_BOX(content_area), gtk_label_new("Enter Time Quantum:"), FALSE, FALSE, 5);
+        gtk_box_pack_start(GTK_BOX(content_area), quantum_entry, FALSE, FALSE, 5);
+        gtk_widget_show_all(quantum_dialog);
+
+        if (gtk_dialog_run(GTK_DIALOG(quantum_dialog)) == GTK_RESPONSE_OK) {
+            int quantum = atoi(gtk_entry_get_text(GTK_ENTRY(quantum_entry)));
+            round_robin(quantum);
+        }
+
+        gtk_widget_destroy(quantum_dialog);
+    } else if (response == 2) {
+        sjf();
+    } else if (response == 3) {
+        priority_scheduling();
+    }
+
+    gtk_widget_destroy(dialog);
+}
+
+void round_robin(int quantum) {
+    int time = 0;
+    int processes_remaining = process_count;
+
+    while (processes_remaining > 0) {
+        for (int i = 0; i < process_count; i++) {
+            if (processes[i].remaining_time > 0) {
+                int exec_time = (processes[i].remaining_time > quantum) ? quantum : processes[i].remaining_time;
+                processes[i].remaining_time -= exec_time;
+                time += exec_time;
+
+                if (processes[i].remaining_time == 0) {
+                    processes[i].turnaround_time = time - processes[i].arrival_time;
+                    processes[i].waiting_time = processes[i].turnaround_time - processes[i].burst_time;
+                    processes_remaining--;
+                }
+            }
+        }
+    }
+
+    log_system_call("Round Robin scheduling completed.");
+    update_process_table();
+}
+
+void sjf() {
+    for (int i = 0; i < process_count - 1; i++) {
+        for (int j = 0; j < process_count - i - 1; j++) {
+            if (processes[j].burst_time > processes[j + 1].burst_time) {
+                Process temp = processes[j];
+                processes[j] = processes[j + 1];
+                processes[j + 1] = temp;
+            }
+        }
+    }
+
+    int time = 0;
+    for (int i = 0; i < process_count; i++) {
+        processes[i].waiting_time = time - processes[i].arrival_time;
+        time += processes[i].burst_time;
+        processes[i].turnaround_time = time - processes[i].arrival_time;
+    }
+
+    log_system_call("SJF scheduling completed.");
+    update_process_table();
+}
+
+void priority_scheduling() {
+    for (int i = 0; i < process_count - 1; i++) {
+        for (int j = 0; j < process_count - i - 1; j++) {
+            if (processes[j].priority > processes[j + 1].priority) {
+                Process temp = processes[j];
+                processes[j] = processes[j + 1];
+                processes[j + 1] = temp;
+            }
+        }
+    }
+
+    int time = 0;
+    for (int i = 0; i < process_count; i++) {
+        processes[i].waiting_time = time - processes[i].arrival_time;
+        time += processes[i].burst_time;
+        processes[i].turnaround_time = time - processes[i].arrival_time;
+    }
+
+    log_system_call("Priority scheduling completed.");
+    update_process_table();
+}
+
+// Main Function
+int main(int argc, char *argv[]) {
+    gtk_init(&argc, &argv);
+
+    window = gtk_window_new(GTK_WINDOW_TOPLEVEL);
+    gtk_window_set_title(GTK_WINDOW(window), "OS Simulator");
+    gtk_window_set_default_size(GTK_WINDOW(window), 1024, 768);
+    g_signal_connect(window, "destroy", G_CALLBACK(gtk_main_quit), NULL);
+
+    show_main_menu();
+
+    gtk_main();
+
+    return 0;
+}
